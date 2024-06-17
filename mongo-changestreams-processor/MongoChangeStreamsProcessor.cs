@@ -137,11 +137,8 @@ namespace mongo_changestreams_processor
                     {
                         var leasedPartition = await _leaseStore.AcquireLeaseAsync(partition);
                         if (leasedPartition != null)
-                        {
-                            leasedPartition.ResetLeaseControl();
                             _acquiredPartitions.TryAdd(leasedPartition._id, leasedPartition);
-                            _collectionPartitions.TryAdd(leasedPartition._id, leasedPartition);
-                        }
+
                         if (_builder.printDebugLogs)
                             await Console.Out.WriteLineAsync($"DEBUG: Acquired lease on partition {partition._id}");
                     }
@@ -293,9 +290,7 @@ namespace mongo_changestreams_processor
                             var t = ProcessPartitionAsync(leasedPartition, _cancellation.Token);
                             _runningPartitionTasks.TryAdd(key, t);
 
-                            leasedPartition.ResetLeaseControl();
                             _acquiredPartitions.TryAdd(leasedPartition._id, leasedPartition);
-                            _collectionPartitions.TryAdd(leasedPartition._id, leasedPartition);
                         }
 
                         if (_builder.printDebugLogs)

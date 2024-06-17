@@ -27,6 +27,7 @@ namespace mongo_changestreams_processor
             try
             {
                 await _leaseCollection.InsertOneAsync(lease);
+                lease.ResetLeaseControl();
                 return true;
             }
             catch (MongoWriteException ex)
@@ -43,7 +44,7 @@ namespace mongo_changestreams_processor
             var builder = Builders<PartitionLease>.Filter;
             var filter = builder.Eq(p => p.processor, lease.processor);
             filter &= builder.Eq(p => p._id, lease._id);
-            filter &= builder.Or(builder.Eq(p => p.balanceRequest, string.Empty), builder.Eq(p => p.balanceRequest, _instanceId));
+            filter &= builder.Eq(p => p.balanceRequest, string.Empty);
 
             var update = Builders<PartitionLease>.Update.Set(p => p.balanceRequest, _instanceId);
 
@@ -73,9 +74,11 @@ namespace mongo_changestreams_processor
             var filter = builder.Eq(p => p.processor, lease.processor);
             filter &= builder.Eq(p => p._id, lease._id);
             filter &= builder.Eq(p => p.owner, string.Empty);
+            // Only acquire the lease if not requested by another instance or already owned by the current instance
             filter &= builder.Or(builder.Eq(p => p.balanceRequest, string.Empty), builder.Eq(p => p.balanceRequest, _instanceId));
 
             lease.owner = _instanceId;
+            // Clear the balance request if balance is allowed or lock the partition for the current instance
             lease.balanceRequest = _options.AllowBalance ? string.Empty : _instanceId;
 
             var update = Builders<PartitionLease>.Update
@@ -91,6 +94,8 @@ namespace mongo_changestreams_processor
 
                 if (result.owner == _instanceId)
                 {
+                    result.ResetLeaseControl();
+                    // Must return updated lease to get the latest token
                     return result;
                 }
                 else
@@ -120,6 +125,7 @@ namespace mongo_changestreams_processor
             filter &= builder.Eq(p => p.owner, lease.owner);
 
             lease.owner = string.Empty;
+            // Clear the balance request if it was set by the current instance (disabled balance)
             lease.balanceRequest = lease.balanceRequest == _instanceId ? string.Empty : lease.balanceRequest;
 
             var update = Builders<PartitionLease>.Update
@@ -132,7 +138,7 @@ namespace mongo_changestreams_processor
 
         internal async Task StoreResumeToken(PartitionLease lease)
         {
-            // Build filter for upsert token for a particular thread
+            // Build filter for upsert token for current leased partition
             var builder = Builders<PartitionLease>.Filter;
             var filter = builder.Eq(p => p.processor, lease.processor);
             filter &= builder.Eq(p => p._id, lease._id);
@@ -142,11 +148,12 @@ namespace mongo_changestreams_processor
                 .Set(p => p.token, lease.token)
                 .Set(p => p.timeStamp, DateTime.UtcNow);
 
-            var projection = Builders<PartitionLease>.Projection.Include(p => p.balanceRequest);//.Include(p => p.owner);
+            var projection = Builders<PartitionLease>.Projection.Include(p => p.balanceRequest);
 
             // Upsert the token
-            var result = await _leaseCollection.FindOneAndUpdateAsync(filter, Builders<PartitionLease>.Update.Combine(update), new FindOneAndUpdateOptions<PartitionLease> { IsUpsert = true, ReturnDocument = ReturnDocument.After, Projection = projection });
+            var result = await _leaseCollection.FindOneAndUpdateAsync(filter, update, new FindOneAndUpdateOptions<PartitionLease> { IsUpsert = true, ReturnDocument = ReturnDocument.After, Projection = projection });
 
+            // Update the balance request if it was set by another instance
             lease.balanceRequest = result.balanceRequest;
 
             lease.ResetLeaseControl();
