@@ -39,7 +39,7 @@ public partial class Program
 
         try
         {
-            await processor.StartAsync();
+            await processor.StartAsync(cts.Token);
             await Task.Delay(-1, cts.Token);
         }
         catch (Exception)

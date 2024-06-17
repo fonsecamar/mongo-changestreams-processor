@@ -29,6 +29,7 @@ namespace mongo_changestreams_processor
         public MongoChangeStreamsProcessorBuilder WithMongoClient(MongoClient mongoClient)
         {
             this.mongoClient = mongoClient;
+            this.processorOptions.IsCosmosRU = mongoClient.Settings.Server.Host.ToLowerInvariant().Contains(".mongo.cosmos.azure.com");
             return this;
         }
 

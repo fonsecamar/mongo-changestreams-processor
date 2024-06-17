@@ -53,7 +53,7 @@ namespace mongo_changestreams_processor
             _leaseStore = new(_leaseCollection, _instanceId, _builder.leaseOptions);
         }
 
-        public async Task StartAsync()
+        public async Task StartAsync(CancellationToken cancellation)
         {
             if (_isRunning)
                 return;
@@ -62,7 +62,7 @@ namespace mongo_changestreams_processor
                 await Console.Out.WriteLineAsync($"DEBUG: Instance Id: {_instanceId}");
 
             // Start the processor
-            await AcquireLeaseAsync(_cancellation.Token);
+            await AcquireLeaseAsync(cancellation);
             var m = MonitorPartitionsAsync(_cancellation.Token);
             _runningPartitionTasks.TryAdd("monitor", m);
 
@@ -111,16 +111,16 @@ namespace mongo_changestreams_processor
                         {
                             var balanceIntent = _collectionPartitions.Values.GroupBy(x => x.owner).Where(x => x.Count() > 1).ToList();
 
-                            if (balanceIntent.Count == 0)
-                                return;
-
-                            var number = Math.Floor(_collectionPartitions.Count / (balanceIntent.Count + 1) * 1F);
-
-                            foreach (var partition in _collectionPartitions.TakeLast((int)number))
+                            if (balanceIntent.Count > 0)
                             {
-                                if (_builder.printDebugLogs)
-                                    await Console.Out.WriteLineAsync($"DEBUG: Requesting balance intent on partition {partition.Key}");
-                                await _leaseStore.RequestBalanceIntentAsync(partition.Value);
+                                var number = Math.Floor(_collectionPartitions.Count / (balanceIntent.Count + 1) * 1F);
+
+                                foreach (var partition in _collectionPartitions.TakeLast((int)number))
+                                {
+                                    if (_builder.printDebugLogs)
+                                        await Console.Out.WriteLineAsync($"DEBUG: Requesting balance intent on partition {partition.Key}");
+                                    await _leaseStore.RequestBalanceIntentAsync(partition.Value);
+                                }
                             }
                         }
 
@@ -202,11 +202,20 @@ namespace mongo_changestreams_processor
         {
             bool leaseRenewalRequired = false;
 
+            var projection = Builders<ChangeStreamDocument<BsonDocument>>.Projection
+                .Include("_id")
+                .Include("fullDocument")
+                .Include("ns")
+                .Include("documentKey");
+
+            if(!_builder.processorOptions.IsCosmosRU)
+                projection.Include("operationType")
+                    .Include("updateDescription");
+
             // Create a pipeline
             var pipeline = new EmptyPipelineDefinition<ChangeStreamDocument<BsonDocument>>()
                 .Match(change => change.OperationType == ChangeStreamOperationType.Insert || change.OperationType == ChangeStreamOperationType.Update || change.OperationType == ChangeStreamOperationType.Replace)
-                .AppendStage<ChangeStreamDocument<BsonDocument>, ChangeStreamDocument<BsonDocument>, BsonDocument>(
-                    "{ $project: { '_id': 1, 'fullDocument': 1, 'ns': 1, 'documentKey': 1 }}");
+                .Project(projection);
 
             // Create options
             var options = new ChangeStreamOptions

@@ -33,7 +33,8 @@ namespace mongo_changestreams_processor
             {
                 if (ex.WriteError.Category == ServerErrorCategory.DuplicateKey)
                     return false;
-                throw;
+                else
+                    throw;
             }
         }
 
@@ -42,10 +43,28 @@ namespace mongo_changestreams_processor
             var builder = Builders<PartitionLease>.Filter;
             var filter = builder.Eq(p => p.processor, lease.processor);
             filter &= builder.Eq(p => p._id, lease._id);
+            filter &= builder.Or(builder.Eq(p => p.balanceRequest, string.Empty), builder.Eq(p => p.balanceRequest, _instanceId));
 
             var update = Builders<PartitionLease>.Update.Set(p => p.balanceRequest, _instanceId);
 
-            await _leaseCollection.UpdateOneAsync(filter, update, new UpdateOptions { IsUpsert = true });
+            try
+            {
+                await _leaseCollection.UpdateOneAsync(filter, update, new UpdateOptions { IsUpsert = true });
+            }
+            catch (MongoCommandException ex)
+            {
+                if (ex.Code == 11000)
+                    return;
+                else
+                    throw;
+            }
+            catch(MongoWriteException ex)
+            {
+                if (ex.WriteError.Category == ServerErrorCategory.DuplicateKey)
+                    return;
+                else
+                    throw;
+            }
         }
 
         internal async Task<PartitionLease?> AcquireLeaseAsync(PartitionLease lease)
@@ -53,7 +72,8 @@ namespace mongo_changestreams_processor
             var builder = Builders<PartitionLease>.Filter;
             var filter = builder.Eq(p => p.processor, lease.processor);
             filter &= builder.Eq(p => p._id, lease._id);
-            filter &= builder.Or(builder.Eq(p => p.owner, string.Empty), builder.Eq(p => p.balanceRequest, _instanceId));
+            filter &= builder.Eq(p => p.owner, string.Empty);
+            filter &= builder.Or(builder.Eq(p => p.balanceRequest, string.Empty), builder.Eq(p => p.balanceRequest, _instanceId));
 
             lease.owner = _instanceId;
             lease.balanceRequest = _options.AllowBalance ? string.Empty : _instanceId;
@@ -80,8 +100,16 @@ namespace mongo_changestreams_processor
             {
                 if (ex.Code == 11000)
                     return null;
-                throw;
-            }            
+                else
+                    throw;
+            }
+            catch (MongoWriteException ex)
+            {
+                if (ex.WriteError.Category == ServerErrorCategory.DuplicateKey)
+                    return null;
+                else
+                    throw;
+            }
         }
 
         internal async Task ReleaseLeaseAsync(PartitionLease lease)

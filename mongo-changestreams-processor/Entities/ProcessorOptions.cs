@@ -4,6 +4,7 @@ namespace mongo_changestreams_processor.Entities
 {
     internal class ProcessorOptions
     {
+        internal bool IsCosmosRU { get; set; } = false;
         internal bool AllowBalance { get; set; } = true;
         internal string ProcessorName { get; set; } = "processor";
         internal bool StartFromBeginning { get; set; } = false;
