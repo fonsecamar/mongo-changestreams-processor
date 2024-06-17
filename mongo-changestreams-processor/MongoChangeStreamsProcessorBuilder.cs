@@ -1,4 +1,5 @@
-﻿using MongoDB.Bson;
+﻿using mongo_changestreams_processor.Entities;
+using MongoDB.Bson;
 using MongoDB.Driver;
 
 namespace mongo_changestreams_processor
@@ -9,29 +10,16 @@ namespace mongo_changestreams_processor
         {
         }
 
-        private MongoClient? _mongoClient = null;
-        internal MongoClient? _leaseClient = null;
+        private MongoClient? mongoClient = null;
+        private MongoClient? leaseClient = null;
 
-        internal string _databaseName = string.Empty;
-        internal string _collectionName = string.Empty;
+        internal string databaseName = string.Empty;
+        internal string collectionName = string.Empty;
 
-        internal string? _leaseDatabaseName;
-        internal string? _leaseCollectionName;
+        internal bool printDebugLogs = false;
 
-        internal string _processorName = string.Empty;
-
-        internal bool _startFromBeginning;
-        internal DateTime _startTime = DateTime.MinValue;
-
-        internal int _batchSize = 100;
-
-        internal int _leaseRenewalInterval = 17000;
-        internal int _leaseExpirationInterval = 60000;
-
-        internal bool _allowBalance = true;
-        internal bool _printDebugLogs = false;
-
-        private static readonly MongoChangeStreamsProcessorBuilder _builder = new MongoChangeStreamsProcessorBuilder();
+        internal readonly LeaseOptions leaseOptions = new();
+        internal readonly ProcessorOptions processorOptions = new();
 
         public static MongoChangeStreamsProcessorBuilder Create()
         {
@@ -40,96 +28,138 @@ namespace mongo_changestreams_processor
 
         public MongoChangeStreamsProcessorBuilder WithMongoClient(MongoClient mongoClient)
         {
-            _mongoClient = mongoClient;
+            this.mongoClient = mongoClient;
             return this;
         }
 
         public MongoChangeStreamsProcessorBuilder WithDatabase(string databaseName)
         {
-            _databaseName = databaseName;
+            this.databaseName = databaseName;
             return this;
         }
 
         public MongoChangeStreamsProcessorBuilder WithCollection(string collectionName)
         {
-            _collectionName = collectionName;
+            this.collectionName = collectionName;
             return this;
         }
 
         public MongoChangeStreamsProcessorBuilder WithLeaseClient(MongoClient leaseClient)
         {
-            _leaseClient = leaseClient;
+            this.leaseClient = leaseClient;
             return this;
         }
 
         public MongoChangeStreamsProcessorBuilder WithLeaseDatabase(string leaseDatabaseName)
         {
-            _leaseDatabaseName = leaseDatabaseName;
+            this.leaseOptions.LeaseDatabaseName = leaseDatabaseName;
             return this;
         }
 
         public MongoChangeStreamsProcessorBuilder WithLeaseCollection(string leaseCollectionName)
         {
-            _leaseCollectionName = leaseCollectionName;
+            if (string.IsNullOrEmpty(leaseCollectionName))
+            {
+                throw new System.ArgumentException("Lease collection name cannot be null or empty", nameof(leaseCollectionName));
+            }
+
+            this.leaseOptions.LeaseCollectionName = leaseCollectionName;
             return this;
         }
 
         public MongoChangeStreamsProcessorBuilder WithDisableBalance()
         {
-            _allowBalance = false;
+            this.processorOptions.AllowBalance = this.leaseOptions.AllowBalance = false;
             return this;
         }
 
-        public MongoChangeStreamsProcessorBuilder WithProcessorName(string processorName)
+        public MongoChangeStreamsProcessorBuilder WithProcessorName(string processorName, Func<IEnumerable<BsonDocument>, CancellationToken, Task> onChangesHandler)
         {
-            _processorName = processorName;
+            if (string.IsNullOrEmpty(processorName))
+            {
+                throw new System.ArgumentException("Processor name cannot be null or empty", nameof(processorName));
+            }
+
+            if (onChangesHandler == null)
+            {
+                throw new System.ArgumentException("OnChangesHandler cannot be null", nameof(onChangesHandler));
+            }
+
+            this.processorOptions.ProcessorName = processorName;
+            this.processorOptions.OnChangesHandler = onChangesHandler;
             return this;
         }
 
         public MongoChangeStreamsProcessorBuilder WithStartFromBeginning()
         {
-            _startFromBeginning = true;
+            this.processorOptions.StartFromBeginning = true;
             return this;
         }
 
         public MongoChangeStreamsProcessorBuilder WithStartTime(DateTime startTime)
         {
-            _startTime = startTime;
+            this.processorOptions.StartTime = startTime;
             return this;
         }
 
         public MongoChangeStreamsProcessorBuilder WithBatchSize(int batchSize)
         {
-            _batchSize = batchSize;
+            if (batchSize <= 0)
+            {
+                throw new System.ArgumentException("Batch size must be greater than 0", nameof(batchSize));
+            }
+
+            this.processorOptions.BatchSize = batchSize;
+            return this;
+        }
+
+        public MongoChangeStreamsProcessorBuilder WithLeaseAcquireInterval(int leaseAcquireInterval)
+        {
+            this.leaseOptions.LeaseAcquireInterval = leaseAcquireInterval;
             return this;
         }
 
         public MongoChangeStreamsProcessorBuilder WithLeaseRenewalInterval(int leaseRenewalInterval)
         {
-            _leaseRenewalInterval = leaseRenewalInterval;
+            this.leaseOptions.LeaseRenewalInterval = leaseRenewalInterval;
             return this;
         }
 
         public MongoChangeStreamsProcessorBuilder WithLeaseExpirationInterval(int leaseExpirationInterval)
         {
-            _leaseExpirationInterval = leaseExpirationInterval;
+            this.leaseOptions.LeaseExpirationInterval = leaseExpirationInterval;
             return this;
         }
 
         public MongoChangeStreamsProcessorBuilder WithDebugLogs()
         {
-            _printDebugLogs = true;
+            this.printDebugLogs = true;
             return this;
         }
 
         public MongoChangeStreamsProcessor Build()
         {
-            if (_mongoClient == null)
+            if (this.mongoClient == null)
             {
                 throw new InvalidOperationException("MongoClient must be set before building.");
             }
 
-            return new MongoChangeStreamsProcessor(this, _mongoClient);
+            if(this.leaseClient == null)
+            {
+                this.leaseClient = this.mongoClient;
+            }
+
+            if (string.IsNullOrEmpty(this.databaseName) || string.IsNullOrEmpty(this.collectionName))
+            {
+                throw new InvalidOperationException("Database and Collection must be set before building.");
+            }
+
+            if(string.IsNullOrEmpty(this.leaseOptions.LeaseDatabaseName))
+            {
+                this.leaseOptions.LeaseDatabaseName = this.databaseName;
+            }
+
+            return new MongoChangeStreamsProcessor(this, mongoClient, leaseClient);
         }
     }
 }

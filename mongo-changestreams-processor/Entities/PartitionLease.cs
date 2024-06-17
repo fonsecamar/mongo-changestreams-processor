@@ -14,7 +14,7 @@ namespace mongo_changestreams_processor.Entities
         public int partitionNumber { get; set; }
         public BsonDocument token { get; set; }
         public DateTime timeStamp { get; set; }
-        public string balanceControl { get; set; } = "None";
+        public string balanceRequest { get; set; } = "";
 
         internal Stopwatch leaseControl = new();
 
@@ -23,7 +23,7 @@ namespace mongo_changestreams_processor.Entities
             return timeStamp.AddMilliseconds(leaseExpirationInterval) < DateTime.UtcNow;
         }
 
-        internal void ResetLeaseControl(bool stop)
+        internal void ResetLeaseControl(bool stop = false)
         {
             if (stop)
             {
@@ -38,6 +38,14 @@ namespace mongo_changestreams_processor.Entities
         internal bool IsLeaseRenewalRequired(int leaseRenewalInterval)
         {
             return leaseControl.ElapsedMilliseconds > leaseRenewalInterval;
+        }
+
+        internal bool IsReleaseLeaseRequested
+        {
+            get
+            {
+                return !string.IsNullOrEmpty(balanceRequest) && balanceRequest != owner;
+            }
         }
     }
 }

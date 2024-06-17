@@ -30,17 +30,19 @@ public partial class Program
             .WithMongoClient(mongoClient)
             .WithDatabase(databaseName)
             .WithCollection(collectionName)
-            .WithProcessorName("consumer1")
-            //.WithLeaseExpirationInterval(60000)
-            //.WithLeaseRenewalInterval(30000)
+            .WithProcessorName("consumer2", ProcessAsync)
+            //.WithDisableBalance()
+            .WithLeaseExpirationInterval(60000)
+            .WithLeaseRenewalInterval(30000)
+            .WithDebugLogs()
             .Build();
 
         try
         {
-            await processor.StartAsync(ProcessAsync);
+            await processor.StartAsync();
             await Task.Delay(-1, cts.Token);
         }
-        catch (TaskCanceledException)
+        catch (Exception)
         {
             await processor.StopAsync();
             Console.WriteLine("Stopped!");

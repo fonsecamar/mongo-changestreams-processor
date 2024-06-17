@@ -1,6 +1,7 @@
 ﻿using mongo_changestreams_processor.Entities;
 using MongoDB.Bson;
 using MongoDB.Driver;
+using System.Collections.Concurrent;
 
 namespace mongo_changestreams_processor
 {
@@ -14,59 +15,65 @@ namespace mongo_changestreams_processor
         private IMongoCollection<BsonDocument> _collection;
         private IMongoCollection<PartitionLease> _leaseCollection;
 
-        private string _processorName;
+        private PartitionLeaseStore _leaseStore;
+        private ConcurrentDictionary<string, PartitionLease> _acquiredPartitions = new();
+        private ConcurrentDictionary<string, PartitionLease>? _collectionPartitions;
+
         private string _databaseName;
         private string _collectionName;
 
-        private int _batchSize;
-        private int _leaseRenewalInterval;
-        private int _leaseExpirationInterval;
-
         private bool _isRunning = false;
-        private Task _monitorPartitionsTask = Task.CompletedTask;
-        private List<Task> _runningPartitions = new();
+        private ConcurrentDictionary<string, Task> _runningPartitionTasks = new();
         private CancellationTokenSource _cancellation = new();
 
-        public delegate Task ChangesHandler(IEnumerable<BsonDocument> changes, CancellationToken cancellationToken);
+        
 
-        internal MongoChangeStreamsProcessor(MongoChangeStreamsProcessorBuilder builder, MongoClient mongoClient)
+        internal MongoChangeStreamsProcessor(MongoChangeStreamsProcessorBuilder builder, MongoClient mongoClient, MongoClient leaseClient)
         {
             _builder = builder;
             _mongoClient = mongoClient;
 
-            _processorName = _builder._processorName;
-            _databaseName = _builder._databaseName;
-            _collectionName = _builder._collectionName;
-
-            _batchSize = _builder._batchSize;
-            _leaseRenewalInterval = _builder._leaseRenewalInterval;
-            _leaseExpirationInterval = _builder._leaseExpirationInterval;
+            _databaseName = _builder.databaseName;
+            _collectionName = _builder.collectionName;
 
             // Initialize the processor
             _database = _mongoClient.GetDatabase(_databaseName);
-            _collection = _database.GetCollection<BsonDocument>(_collectionName);
-            _leaseCollection = (_builder._leaseClient ?? _mongoClient).GetDatabase(_builder._leaseDatabaseName ?? _databaseName).GetCollection<PartitionLease>(_builder._leaseCollectionName ?? "leases");
+            if (_database == null)
+                throw new Exception("Database not found");
 
-            if (_database == null || _collection == null || _leaseCollection == null)
-                throw new Exception("Database, Collection or Lease Collection not found");
+            _collection = _database.GetCollection<BsonDocument>(_collectionName);
+            if (_collection == null)
+                throw new Exception("Collection not found");
+
+            _leaseCollection = leaseClient.GetDatabase(_builder.leaseOptions.LeaseDatabaseName).GetCollection<PartitionLease>(_builder.leaseOptions.LeaseCollectionName);
+
+            if (_leaseCollection == null)
+                throw new Exception("Lease Collection not found");
+
+            _leaseStore = new(_leaseCollection, _instanceId, _builder.leaseOptions);
         }
 
-        public async Task StartAsync(ChangesHandler onChangesDelegate)
+        public async Task StartAsync()
         {
             if (_isRunning)
                 return;
 
+            if (_builder.printDebugLogs)
+                await Console.Out.WriteLineAsync($"DEBUG: Instance Id: {_instanceId}");
+
             // Start the processor
-            var acquiredPartitions = await AcquireLeaseAsync(_cancellation.Token);
-            //_monitorPartitionsTask = MonitorPartitionsAsync(cancellation);
+            await AcquireLeaseAsync(_cancellation.Token);
+            var m = MonitorPartitionsAsync(_cancellation.Token);
+            _runningPartitionTasks.TryAdd("monitor", m);
 
-            if (acquiredPartitions.Count == 0)
-                throw new Exception("Cannot acquire lease");
+            if (_acquiredPartitions.Count == 0)
+                throw new Exception("Could not acquire any partition lease");
 
-            foreach (var partition in acquiredPartitions)
+            foreach (var partition in _acquiredPartitions)
             {
                 // Start the processor for each partition
-                _runningPartitions.Add(ProcessPartitionAsync(partition.Value, onChangesDelegate, _cancellation.Token));
+                var t = ProcessPartitionAsync(partition.Value, _cancellation.Token);
+                _runningPartitionTasks.TryAdd(partition.Key, t);
             }
 
             _isRunning = true;
@@ -80,63 +87,84 @@ namespace mongo_changestreams_processor
             // Stop the processor
             _cancellation.Cancel();
 
-            await Task.WhenAll(_runningPartitions);
+            await Task.WhenAll(_runningPartitionTasks.Values);
 
-            _runningPartitions.Clear();
+            _runningPartitionTasks.Clear();
             _isRunning = false;
         }
 
-        internal async Task<Dictionary<int, PartitionLease>> AcquireLeaseAsync(CancellationToken cancellation)
+        internal async Task AcquireLeaseAsync(CancellationToken cancellation)
         {
-            Dictionary<int, PartitionLease> partitions;
-            bool leaseAcquired = false;
-
             do
             {
-                var filter = Builders<PartitionLease>.Filter.Eq(p => p.processor, $"{_processorName}-{_mongoClient.Settings.Server.Host}-{_database.DatabaseNamespace}-{_collectionName}");
-                var leases = await _leaseCollection.FindAsync<PartitionLease>(filter, cancellationToken: cancellation);
+                _collectionPartitions = new ConcurrentDictionary<string, PartitionLease>(await _leaseStore.GetAllLeasesAsync($"{_builder.processorOptions.ProcessorName}-{_mongoClient.Settings.Server.Host}-{_database.DatabaseNamespace}-{_collectionName}"));
 
-                if (await leases.MoveNextAsync() && leases.Current.Count() > 0)
+                if (_collectionPartitions.Count > 0)
                 {
                     // Use found tokens to resume
-                    var tempPartitions = leases.Current.ToDictionary(x => x.partitionNumber, x => x);
                     // Get partitions that have no owners or lease has expired. Filter out partitions that are not owned by this instance.
-                    partitions = tempPartitions.Where(x => x.Value.owner == _instanceId || x.Value.owner == string.Empty || (x.Value.IsLeaseExpired(_leaseExpirationInterval))).ToDictionary();
+                    var tempPartitions = _collectionPartitions.Values.Where(x => x.owner == _instanceId || (x.owner == string.Empty && (x.balanceRequest == _instanceId || string.IsNullOrEmpty(x.balanceRequest))) || (x.IsLeaseExpired(_builder.leaseOptions.LeaseExpirationInterval))).ToList();
+
+                    if (tempPartitions.Count() == 0)
+                    {
+                        if (_builder.processorOptions.AllowBalance && _collectionPartitions.Count > 1)
+                        {
+                            var balanceIntent = _collectionPartitions.Values.GroupBy(x => x.owner).Where(x => x.Count() > 1).ToList();
+
+                            if (balanceIntent.Count == 0)
+                                return;
+
+                            var number = Math.Floor(_collectionPartitions.Count / (balanceIntent.Count + 1) * 1F);
+
+                            foreach (var partition in _collectionPartitions.TakeLast((int)number))
+                            {
+                                if (_builder.printDebugLogs)
+                                    await Console.Out.WriteLineAsync($"DEBUG: Requesting balance intent on partition {partition.Key}");
+                                await _leaseStore.RequestBalanceIntentAsync(partition.Value);
+                            }
+                        }
+
+                        if (_builder.printDebugLogs)
+                            await Console.Out.WriteLineAsync("DEBUG: Lease not acquired. Sleeping...");
+
+                        _collectionPartitions.Clear();
+
+                        await Task.Delay(_builder.leaseOptions.LeaseAcquireInterval, cancellation);
+                        continue;
+                    }
+
+                    foreach (var partition in tempPartitions)
+                    {
+                        var leasedPartition = await _leaseStore.AcquireLeaseAsync(partition);
+                        if (leasedPartition != null)
+                        {
+                            leasedPartition.ResetLeaseControl();
+                            _acquiredPartitions.TryAdd(leasedPartition._id, leasedPartition);
+                            _collectionPartitions.TryAdd(leasedPartition._id, leasedPartition);
+                        }
+                        if (_builder.printDebugLogs)
+                            await Console.Out.WriteLineAsync($"DEBUG: Acquired lease on partition {partition._id}");
+                    }
                 }
                 else
                 {
-                    var startDate = _builder._startFromBeginning ? DateTime.MinValue : _builder._startTime;
+                    var startDate = _builder.processorOptions.StartFromBeginning ? DateTime.MinValue : _builder.processorOptions.StartTime;
                     // If no leases found, get tokens from database
-                    partitions = await GetPartitionTokensAsync(startDate, cancellation);
+                    _collectionPartitions = new ConcurrentDictionary<string, PartitionLease>(await GetPartitionTokensAsync(startDate, cancellation));
+
+                    foreach (var partition in _collectionPartitions)
+                    {
+                        if (await _leaseStore.CreateNewLeaseAsync(partition.Value))
+                            _acquiredPartitions.TryAdd(partition.Key, partition.Value);
+                    }
                 }
 
-                if (partitions.Count() == 0)
-                {
-                    if(_builder._printDebugLogs)
-                        await Console.Out.WriteLineAsync("DEBUG: Lease not acquired. Sleeping...");
-                    
-                    await Task.Delay(_leaseRenewalInterval, cancellation);
-                    continue;
-                }
-
-                foreach (var partition in partitions)
-                {
-                    await StoreResumeToken(partition.Value);
-                }
-
-                if (_builder._printDebugLogs)
-                    await Console.Out.WriteLineAsync("DEBUG: Lease acquired!");
-
-                leaseAcquired = true;
-
-            } while (!leaseAcquired);
-
-            return partitions;
+            } while (_acquiredPartitions.Count == 0 && !cancellation.IsCancellationRequested);
         }
 
-        internal async Task<Dictionary<int, PartitionLease>> GetPartitionTokensAsync(DateTime initialTimestamp, CancellationToken cancellation)
+        internal async Task<Dictionary<string, PartitionLease>> GetPartitionTokensAsync(DateTime initialTimestamp, CancellationToken cancellation)
         {
-            Dictionary<int, PartitionLease> partitions = new();
+            Dictionary<string, PartitionLease> partitions = new();
 
             // If this is initial run (no leases found), get tokens from database and consider the timestamp parameter
             var diff = initialTimestamp.ToUniversalTime() - DateTime.UnixEpoch;
@@ -155,25 +183,23 @@ namespace mongo_changestreams_processor
             int counter = 1;
             foreach (var p in streams["resumeAfterTokens"].AsBsonArray)
             {
-                var partition = new PartitionLease() 
+                var partition = new PartitionLease()
                 {
-                    _id = $"{_processorName}-{counter}-{_mongoClient.Settings.Server.Host}-{_database.DatabaseNamespace}-{_collectionName}",
-                    processor = $"{_processorName}-{_mongoClient.Settings.Server.Host}-{_database.DatabaseNamespace}-{_collectionName}",
+                    _id = $"{_builder.processorOptions.ProcessorName}-{counter}-{_mongoClient.Settings.Server.Host}-{_database.DatabaseNamespace}-{_collectionName}",
+                    processor = $"{_builder.processorOptions.ProcessorName}-{_mongoClient.Settings.Server.Host}-{_database.DatabaseNamespace}-{_collectionName}",
                     owner = _instanceId,
-                    partitionNumber = counter, 
-                    token = p.AsBsonDocument, 
-                    balanceControl = !_builder._allowBalance ? "Single" : "None" 
+                    partitionNumber = counter,
+                    token = p.AsBsonDocument
                 };
-                partitions.Add(counter, partition);
+                partitions.Add(partition._id, partition);
                 counter++;
             }
 
             return partitions;
         }
 
-        internal async Task ProcessPartitionAsync(PartitionLease lease, ChangesHandler onChangesDelegate, CancellationToken cancellation)
+        internal async Task ProcessPartitionAsync(PartitionLease lease, CancellationToken cancellation)
         {
-            bool leaseReleased = false;
             bool leaseRenewalRequired = false;
 
             // Create a pipeline
@@ -187,7 +213,7 @@ namespace mongo_changestreams_processor
             {
                 FullDocument = ChangeStreamFullDocumentOption.UpdateLookup,
                 ResumeAfter = lease.token, // Provide the resume tokens to watcher
-                BatchSize = _batchSize, //Define the batch size
+                BatchSize = _builder.processorOptions.BatchSize, //Define the batch size
             };
 
             try
@@ -196,7 +222,7 @@ namespace mongo_changestreams_processor
                 using (var cursor = await _collection.WatchAsync(pipeline, options, cancellation))
                 {
                     // Loop through the changes
-                    while (await cursor.MoveNextAsync() && !cancellation.IsCancellationRequested)
+                    while (await cursor.MoveNextAsync() && !cancellation.IsCancellationRequested && !lease.IsReleaseLeaseRequested)
                     {
                         leaseRenewalRequired = false;
                         try
@@ -207,19 +233,21 @@ namespace mongo_changestreams_processor
                                 lease.token = cursor.GetResumeToken();
 
                                 // Handle received list of documents
-                                await onChangesDelegate(cursor.Current, cancellation);
+                                await _builder.processorOptions.OnChangesHandler(cursor.Current, cancellation);
 
                                 leaseRenewalRequired = true;
                             }
                             else
                             {
-                                leaseRenewalRequired = lease.IsLeaseRenewalRequired(_leaseRenewalInterval);
+                                leaseRenewalRequired = lease.IsLeaseRenewalRequired(_builder.leaseOptions.LeaseRenewalInterval);
                             }
 
-                            leaseReleased = cancellation.IsCancellationRequested;
-                            // After successfully handling documents or reached lease renewal interval, store new resume token or renew the lease
-                            if (leaseReleased || leaseRenewalRequired)
-                                await StoreResumeToken(lease, leaseReleased);
+                            if (leaseRenewalRequired)
+                            {
+                                await _leaseStore.StoreResumeToken(lease);
+                                if (_builder.printDebugLogs)
+                                    await Console.Out.WriteLineAsync($"DEBUG: Token/lease refreshed on partition {lease._id}");
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -227,33 +255,58 @@ namespace mongo_changestreams_processor
                         }
                     }
                 }
-
-                if (!leaseReleased)
-                    await StoreResumeToken(lease, true);
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
                 await Console.Out.WriteLineAsync(ex.Message);
             }
+            finally
+            {
+                await _leaseStore.ReleaseLeaseAsync(lease);
+                _acquiredPartitions.Remove(lease._id, out var p);
+                _runningPartitionTasks.Remove(lease._id, out var task);
+                if (_builder.printDebugLogs)
+                    await Console.Out.WriteLineAsync($"DEBUG: Released partition {lease._id}, AcquiredPartitionsCount: {_acquiredPartitions.Count}, RunningTasks: {_runningPartitionTasks.Count}");
+            }
         }
 
-        internal async Task StoreResumeToken(PartitionLease lease, bool releaseOwer = false)
+        internal async Task MonitorPartitionsAsync(CancellationToken cancellation)
         {
-            // Build filter for upsert token for a particular thread
-            var builder = Builders<PartitionLease>.Filter;
-            var filter = builder.Eq(p => p.processor, lease.processor);
-            filter &= builder.Eq(p => p._id, lease._id);
+            while (!cancellation.IsCancellationRequested)
+            {
+                if (_collectionPartitions != null && _collectionPartitions.Count != _acquiredPartitions.Count)
+                {
+                    foreach (var key in _collectionPartitions.Keys.Except(_acquiredPartitions.Keys))
+                    {
+                        var leasedPartition = await _leaseStore.AcquireLeaseAsync(_collectionPartitions[key]);
+                        if (leasedPartition != null)
+                        {
+                            var t = ProcessPartitionAsync(leasedPartition, _cancellation.Token);
+                            _runningPartitionTasks.TryAdd(key, t);
 
-            lease.timeStamp = DateTime.UtcNow;
-            lease.owner = !releaseOwer ? _instanceId : "";
+                            leasedPartition.ResetLeaseControl();
+                            _acquiredPartitions.TryAdd(leasedPartition._id, leasedPartition);
+                            _collectionPartitions.TryAdd(leasedPartition._id, leasedPartition);
+                        }
 
-            // Upsert the token
-            var result = await _leaseCollection.ReplaceOneAsync(filter, lease, new ReplaceOptions() { IsUpsert = true });
+                        if (_builder.printDebugLogs)
+                            await Console.Out.WriteLineAsync($"DEBUG: Partition Monitor {key}, Status: {(leasedPartition == null ? "Skipped" : "Acquired")}, AcquiredPartitionsCount: {_acquiredPartitions.Count}, RunningTasks: {_runningPartitionTasks.Count}");
+                    }
+                }
 
-            lease.ResetLeaseControl(releaseOwer);
-            
-            if (_builder._printDebugLogs)
-                await Console.Out.WriteLineAsync($"DEBUG: Lease renewed/token updated - {DateTime.UtcNow}");
+                try
+                {
+                    await Task.Delay(_builder.leaseOptions.LeaseAcquireInterval, cancellation).ConfigureAwait(true);
+                }
+                catch (TaskCanceledException)
+                {
+                    // Do nothing
+                }
+            }
+
+            _runningPartitionTasks.Remove("monitor", out var task);
+            if (_builder.printDebugLogs)
+                await Console.Out.WriteLineAsync($"DEBUG: Partition Monitor stopped! RunningTasks: {_runningPartitionTasks.Count}");
         }
     }
 }
