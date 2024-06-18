@@ -1,5 +1,5 @@
 ﻿using Microsoft.Extensions.Configuration;
-using mongo_changestreams_processor;
+using Mongo.ChangeStreams.Processor;
 using MongoDB.Bson;
 using MongoDB.Driver;
 

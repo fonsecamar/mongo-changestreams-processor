@@ -1,7 +1,7 @@
-﻿using mongo_changestreams_processor.Entities;
+﻿using Mongo.ChangeStreams.Processor.Entities;
 using MongoDB.Driver;
 
-namespace mongo_changestreams_processor
+namespace Mongo.ChangeStreams.Processor
 {
     internal class PartitionLeaseStore
     {

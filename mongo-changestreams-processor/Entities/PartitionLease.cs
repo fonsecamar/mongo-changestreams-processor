@@ -2,7 +2,7 @@
 using MongoDB.Bson.Serialization.Attributes;
 using System.Diagnostics;
 
-namespace mongo_changestreams_processor.Entities
+namespace Mongo.ChangeStreams.Processor.Entities
 {
     internal class PartitionLease
     {

@@ -1,4 +1,4 @@
-﻿namespace mongo_changestreams_processor.Entities
+﻿namespace Mongo.ChangeStreams.Processor.Entities
 {
     internal class LeaseOptions
     {

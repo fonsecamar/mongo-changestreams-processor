@@ -1,12 +1,12 @@
-﻿using mongo_changestreams_processor.Entities;
+﻿using Mongo.ChangeStreams.Processor.Entities;
 using MongoDB.Bson;
 using MongoDB.Driver;
 
-namespace mongo_changestreams_processor
+namespace Mongo.ChangeStreams.Processor
 {
     public class MongoChangeStreamsProcessorBuilder
     {
-        internal MongoChangeStreamsProcessorBuilder()
+        private MongoChangeStreamsProcessorBuilder()
         {
         }
 
@@ -99,6 +99,11 @@ namespace mongo_changestreams_processor
 
         public MongoChangeStreamsProcessorBuilder WithStartTime(DateTime startTime)
         {
+            if(this.processorOptions.StartFromBeginning)
+            {
+                throw new System.ArgumentException("Start time cannot be used with StartFromBeginning.", nameof(startTime));
+            }
+
             this.processorOptions.StartTime = startTime;
             return this;
         }

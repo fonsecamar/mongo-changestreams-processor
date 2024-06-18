@@ -1,9 +1,9 @@
-﻿using mongo_changestreams_processor.Entities;
+﻿using Mongo.ChangeStreams.Processor.Entities;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using System.Collections.Concurrent;
 
-namespace mongo_changestreams_processor
+namespace Mongo.ChangeStreams.Processor
 {
     public class MongoChangeStreamsProcessor
     {
@@ -26,8 +26,6 @@ namespace mongo_changestreams_processor
         private ConcurrentDictionary<string, Task> _runningPartitionTasks = new();
         private CancellationTokenSource _cancellation = new();
 
-        
-
         internal MongoChangeStreamsProcessor(MongoChangeStreamsProcessorBuilder builder, MongoClient mongoClient, MongoClient leaseClient)
         {
             _builder = builder;
@@ -45,7 +43,12 @@ namespace mongo_changestreams_processor
             if (_collection == null)
                 throw new Exception("Collection not found");
 
-            _leaseCollection = leaseClient.GetDatabase(_builder.leaseOptions.LeaseDatabaseName).GetCollection<PartitionLease>(_builder.leaseOptions.LeaseCollectionName);
+            var _leaseDatabase = leaseClient.GetDatabase(_builder.leaseOptions.LeaseDatabaseName);
+
+            if (_leaseDatabase == null)
+                throw new Exception("Lease Database not found");
+
+            _leaseCollection = _leaseDatabase.GetCollection<PartitionLease>(_builder.leaseOptions.LeaseCollectionName);
 
             if (_leaseCollection == null)
                 throw new Exception("Lease Collection not found");
@@ -300,7 +303,7 @@ namespace mongo_changestreams_processor
 
                 try
                 {
-                    await Task.Delay(_builder.leaseOptions.LeaseAcquireInterval, cancellation).ConfigureAwait(true);
+                    await Task.Delay(_builder.leaseOptions.LeaseAcquireInterval, cancellation);
                 }
                 catch (TaskCanceledException)
                 {
