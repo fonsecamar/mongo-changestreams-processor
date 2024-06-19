@@ -49,6 +49,8 @@ async Task ProcessAsync(IEnumerable<BsonDocument> changes, CancellationToken can
 | WithStartFromBeginning | none | Starts change streams from the beginning | no |
 | WithStartTime | DateTime | Starts change streams from a specific date time (not compatible with StartFromBeginning) | no |
 | WithBatchSize | int | Defines maximum batch size returned by IEnumerable<BsonDocument> (Default: 100) | no |
+| WithMaxBatchRetryAttempts | int | Defines maximum retry attempts in case of client failure to handle changes (Default: -1 - infinite) | no |
+| WithRetryAttemptInterval | int | Defines interval in milliseconds between retry attemps to handle changes (Default: 1000) | no |
 | WithLeaseAcquireInterval | int | Defines interval in milliseconds between attemps to acquire lease (Default: 13000) | no |
 | WithLeaseRenewalInterval | int | Defines interval in milliseconds to force lease renewal if no changes happened (Default: 17000) | no |
 | WithLeaseExpirationInterval | int | Defines interval in milliseconds to consider a lease expired (Default: 60000) | no |

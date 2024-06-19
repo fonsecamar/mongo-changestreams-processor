@@ -230,11 +230,11 @@ namespace Mongo.ChangeStreams.Processor
                 // Watch the collection
                 using (var cursor = await _collection.WatchAsync(pipeline, options, cancellation))
                 {
-                    var canMoveNext = true;
+                    var retryAttempts = 0;
                     // Loop through the changes
                     while (!cancellation.IsCancellationRequested && !lease.IsReleaseLeaseRequested)
                     {
-                        if (canMoveNext)
+                        if (retryAttempts == 0)
                             await cursor.MoveNextAsync();
 
                         leaseRenewalRequired = false;
@@ -250,14 +250,31 @@ namespace Mongo.ChangeStreams.Processor
                                     // Get resume token for this batch
                                     lease.token = cursor.GetResumeToken();
 
-                                    canMoveNext = leaseRenewalRequired = true;
+                                    leaseRenewalRequired = true;
+                                    retryAttempts = 0;
                                 }
                                 catch(Exception ex)
                                 {
-                                    canMoveNext = leaseRenewalRequired = false;
+                                    if(retryAttempts < _builder.processorOptions.MaxBatchRetryAttempts || _builder.processorOptions.MaxBatchRetryAttempts == -1)
+                                    {
+                                        retryAttempts++;
+                                        leaseRenewalRequired = false;
 
-                                    if (_builder.printDebugLogs)
-                                        await Console.Out.WriteLineAsync($"DEBUG: Exception thrown by delegate!{Environment.NewLine}Message: {ex.Message}{Environment.NewLine}Stack Trace: {ex.StackTrace}");
+                                        if (_builder.printDebugLogs)
+                                            await Console.Out.WriteLineAsync($"DEBUG: Exception thrown by delegate! Retry: {retryAttempts}{Environment.NewLine}Message: {ex.Message}{Environment.NewLine}Stack Trace: {ex.StackTrace}");
+
+                                        await Task.Delay(_builder.processorOptions.RetryAttemptInterval, cancellation);
+                                    }
+                                    else
+                                    {
+                                        retryAttempts = 0;
+                                        leaseRenewalRequired = true;
+                                        // Get resume token for this batch
+                                        lease.token = cursor.GetResumeToken();
+
+                                        if (_builder.printDebugLogs)
+                                            await Console.Out.WriteLineAsync($"DEBUG: Max retry attempts reached!{Environment.NewLine}Message: {ex.Message}{Environment.NewLine}Stack Trace: {ex.StackTrace}");
+                                    }                                    
                                 }                                
                             }
                             else

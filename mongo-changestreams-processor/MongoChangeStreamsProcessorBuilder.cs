@@ -45,6 +45,23 @@ namespace Mongo.ChangeStreams.Processor
             return this;
         }
 
+        public MongoChangeStreamsProcessorBuilder WithProcessorName(string processorName, Func<IEnumerable<BsonDocument>, CancellationToken, Task> onChangesHandler)
+        {
+            if (string.IsNullOrEmpty(processorName))
+            {
+                throw new System.ArgumentException("Processor name cannot be null or empty", nameof(processorName));
+            }
+
+            if (onChangesHandler == null)
+            {
+                throw new System.ArgumentException("OnChangesHandler cannot be null", nameof(onChangesHandler));
+            }
+
+            this.processorOptions.ProcessorName = processorName;
+            this.processorOptions.OnChangesHandler = onChangesHandler;
+            return this;
+        }
+
         public MongoChangeStreamsProcessorBuilder WithLeaseClient(MongoClient leaseClient)
         {
             this.leaseClient = leaseClient;
@@ -74,23 +91,6 @@ namespace Mongo.ChangeStreams.Processor
             return this;
         }
 
-        public MongoChangeStreamsProcessorBuilder WithProcessorName(string processorName, Func<IEnumerable<BsonDocument>, CancellationToken, Task> onChangesHandler)
-        {
-            if (string.IsNullOrEmpty(processorName))
-            {
-                throw new System.ArgumentException("Processor name cannot be null or empty", nameof(processorName));
-            }
-
-            if (onChangesHandler == null)
-            {
-                throw new System.ArgumentException("OnChangesHandler cannot be null", nameof(onChangesHandler));
-            }
-
-            this.processorOptions.ProcessorName = processorName;
-            this.processorOptions.OnChangesHandler = onChangesHandler;
-            return this;
-        }
-
         public MongoChangeStreamsProcessorBuilder WithStartFromBeginning()
         {
             this.processorOptions.StartFromBeginning = true;
@@ -116,6 +116,28 @@ namespace Mongo.ChangeStreams.Processor
             }
 
             this.processorOptions.BatchSize = batchSize;
+            return this;
+        }
+
+        public MongoChangeStreamsProcessorBuilder WithMaxBatchRetryAttempts(int maxBatchRetryAttempts)
+        {
+            if (maxBatchRetryAttempts < -1)
+            {
+                throw new System.ArgumentException("Max batch retry attempts must be greater than -1", nameof(maxBatchRetryAttempts));
+            }
+
+            this.processorOptions.MaxBatchRetryAttempts = maxBatchRetryAttempts;
+            return this;
+        }
+
+        public MongoChangeStreamsProcessorBuilder WithRetryAttemptInterval(int retryAttemptInterval)
+        {
+            if (retryAttemptInterval < 0 || retryAttemptInterval > 1000)
+            {
+                throw new System.ArgumentException("Retry attempt interval must be between 0 and 1000", nameof(retryAttemptInterval));
+            }
+
+            this.processorOptions.RetryAttemptInterval = retryAttemptInterval;
             return this;
         }
 
