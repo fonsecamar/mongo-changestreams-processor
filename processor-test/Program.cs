@@ -61,6 +61,8 @@ public partial class Program
 
     static async Task ProcessAsync(IEnumerable<BsonDocument> changes, CancellationToken cancellationToken)
     {
+        // Errors must throw exception to allow the processor to retry
+        // Failed executions without exception will not be retried
         foreach (var change in changes)
         {
             await Console.Out.WriteLineAsync(change.ToJson());

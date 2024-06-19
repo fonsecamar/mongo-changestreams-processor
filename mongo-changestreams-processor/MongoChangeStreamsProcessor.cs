@@ -230,21 +230,35 @@ namespace Mongo.ChangeStreams.Processor
                 // Watch the collection
                 using (var cursor = await _collection.WatchAsync(pipeline, options, cancellation))
                 {
+                    var canMoveNext = true;
                     // Loop through the changes
-                    while (await cursor.MoveNextAsync() && !cancellation.IsCancellationRequested && !lease.IsReleaseLeaseRequested)
+                    while (!cancellation.IsCancellationRequested && !lease.IsReleaseLeaseRequested)
                     {
+                        if (canMoveNext)
+                            await cursor.MoveNextAsync();
+
                         leaseRenewalRequired = false;
                         try
                         {
                             if (cursor.Current != null && cursor.Current.Count() > 0)
                             {
-                                // Get resume token for this batch
-                                lease.token = cursor.GetResumeToken();
+                                try
+                                {
+                                    // Handle received list of documents
+                                    await _builder.processorOptions.OnChangesHandler(cursor.Current, cancellation);
 
-                                // Handle received list of documents
-                                await _builder.processorOptions.OnChangesHandler(cursor.Current, cancellation);
+                                    // Get resume token for this batch
+                                    lease.token = cursor.GetResumeToken();
 
-                                leaseRenewalRequired = true;
+                                    canMoveNext = leaseRenewalRequired = true;
+                                }
+                                catch(Exception ex)
+                                {
+                                    canMoveNext = leaseRenewalRequired = false;
+
+                                    if (_builder.printDebugLogs)
+                                        await Console.Out.WriteLineAsync($"DEBUG: Exception thrown by delegate!{Environment.NewLine}Message: {ex.Message}{Environment.NewLine}Stack Trace: {ex.StackTrace}");
+                                }                                
                             }
                             else
                             {
