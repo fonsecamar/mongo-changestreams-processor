@@ -44,7 +44,7 @@ async Task ProcessAsync(IEnumerable<BsonDocument> changes, CancellationToken can
 | WithProcessorName | (string, Func<IEnumerable<BsonDocument>, CancellationToken, Task>) | Processor name and delegate invoked on changes | yes |
 | WithLeaseClient | MongoClient | Mongo Client instance to leases account (Default: monitored account client) | no |
 | WithLeaseDatabase | string | Lease database name (Default: monitored database) | no |
-| WithLeaseCollection | string | Leases collection. Must exists and partitioned by /processor attribute (Default: "leases") | no |
+| WithLeaseCollection | string | Leases collection. Must exists and should be either unsharded or sharded by /processor attribute (Default: "leases") | no |
 | WithDisableBalance | none | Disables balance across multiple processor instances with same processor name | no |
 | WithStartFromBeginning | none | Starts change streams from the beginning | no |
 | WithStartTime | DateTime | Starts change streams from a specific date time (not compatible with StartFromBeginning) | no |
