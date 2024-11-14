@@ -68,12 +68,12 @@ namespace Mongo.ChangeStreams.Processor
             }
         }
 
-        internal async Task<PartitionLease?> AcquireLeaseAsync(PartitionLease lease)
+        internal async Task<PartitionLease?> AcquireLeaseAsync(PartitionLease lease, int leaseExpirationInterval)
         {
             var builder = Builders<PartitionLease>.Filter;
             var filter = builder.Eq(p => p.processor, lease.processor);
             filter &= builder.Eq(p => p._id, lease._id);
-            filter &= builder.Eq(p => p.owner, string.Empty);
+            filter &= builder.Or(builder.Eq(p => p.owner, string.Empty), builder.Lt(p => p.timeStamp, lease.timeStamp.AddMilliseconds(leaseExpirationInterval)));
             // Only acquire the lease if not requested by another instance or already owned by the current instance
             filter &= builder.Or(builder.Eq(p => p.balanceRequest, string.Empty), builder.Eq(p => p.balanceRequest, _instanceId));
 

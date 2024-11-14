@@ -138,7 +138,7 @@ namespace Mongo.ChangeStreams.Processor
 
                     foreach (var partition in tempPartitions)
                     {
-                        var leasedPartition = await _leaseStore.AcquireLeaseAsync(partition);
+                        var leasedPartition = await _leaseStore.AcquireLeaseAsync(partition, _builder.leaseOptions.LeaseExpirationInterval);
                         if (leasedPartition != null)
                             _acquiredPartitions.TryAdd(leasedPartition._id, leasedPartition);
 
@@ -148,9 +148,8 @@ namespace Mongo.ChangeStreams.Processor
                 }
                 else
                 {
-                    var startDate = _builder.processorOptions.StartFromBeginning ? DateTime.MinValue : _builder.processorOptions.StartTime;
                     // If no leases found, get tokens from database
-                    _collectionPartitions = new ConcurrentDictionary<string, PartitionLease>(await GetPartitionTokensAsync(startDate, cancellation));
+                    _collectionPartitions = new ConcurrentDictionary<string, PartitionLease>(await GetPartitionTokensAsync(cancellation));
 
                     foreach (var partition in _collectionPartitions)
                     {
@@ -162,37 +161,53 @@ namespace Mongo.ChangeStreams.Processor
             } while (_acquiredPartitions.Count == 0 && !cancellation.IsCancellationRequested);
         }
 
-        internal async Task<Dictionary<string, PartitionLease>> GetPartitionTokensAsync(DateTime initialTimestamp, CancellationToken cancellation)
+        internal async Task<Dictionary<string, PartitionLease>> GetPartitionTokensAsync(CancellationToken cancellation)
         {
             Dictionary<string, PartitionLease> partitions = new();
 
-            // If this is initial run (no leases found), get tokens from database and consider the timestamp parameter
-            var diff = initialTimestamp.ToUniversalTime() - DateTime.UnixEpoch;
+            if (_builder.processorOptions.IsCosmosRU)
+            {
+                var initialTimestamp = _builder.processorOptions.StartFromBeginning ? DateTime.MinValue : _builder.processorOptions.StartTime;
 
-            // Build database command to get Stream Tokens for each physical partition for a particular collection
-            var streamCommand = new BsonDocumentCommand<BsonDocument>(new BsonDocument
+                // If this is initial run (no leases found), get tokens from database and consider the timestamp parameter
+                var diff = initialTimestamp.ToUniversalTime() - DateTime.UnixEpoch;
+
+                // Build database command to get Stream Tokens for each physical partition for a particular collection
+                var streamCommand = new BsonDocumentCommand<BsonDocument>(new BsonDocument
                 {
                     { "customAction", "GetChangeStreamTokens" },
                     { "collection", _collectionName},
                     { "startAtOperationTime", new BsonTimestamp((int)diff.TotalSeconds, 0)},
                 });
 
-            var streams = await _database.RunCommandAsync(streamCommand, null, cancellation);
+                var streams = await _database.RunCommandAsync(streamCommand, null, cancellation);
 
-            // Use tokens returned from database
-            int counter = 1;
-            foreach (var p in streams["resumeAfterTokens"].AsBsonArray)
+                // Use tokens returned from database
+                int counter = 1;
+                foreach (var p in streams["resumeAfterTokens"].AsBsonArray)
+                {
+                    var partition = new PartitionLease()
+                    {
+                        _id = $"{_builder.processorOptions.ProcessorName}-{counter}-{_mongoClient.Settings.Server.Host}-{_database.DatabaseNamespace}-{_collectionName}",
+                        processor = $"{_builder.processorOptions.ProcessorName}-{_mongoClient.Settings.Server.Host}-{_database.DatabaseNamespace}-{_collectionName}",
+                        owner = _instanceId,
+                        partitionNumber = counter,
+                        token = p.AsBsonDocument
+                    };
+                    partitions.Add(partition._id, partition);
+                    counter++;
+                }
+            }
+            else
             {
                 var partition = new PartitionLease()
                 {
-                    _id = $"{_builder.processorOptions.ProcessorName}-{counter}-{_mongoClient.Settings.Server.Host}-{_database.DatabaseNamespace}-{_collectionName}",
+                    _id = $"{_builder.processorOptions.ProcessorName}-1-{_mongoClient.Settings.Server.Host}-{_database.DatabaseNamespace}-{_collectionName}",
                     processor = $"{_builder.processorOptions.ProcessorName}-{_mongoClient.Settings.Server.Host}-{_database.DatabaseNamespace}-{_collectionName}",
                     owner = _instanceId,
-                    partitionNumber = counter,
-                    token = p.AsBsonDocument
+                    partitionNumber = 1
                 };
                 partitions.Add(partition._id, partition);
-                counter++;
             }
 
             return partitions;
@@ -221,9 +236,17 @@ namespace Mongo.ChangeStreams.Processor
             var options = new ChangeStreamOptions
             {
                 FullDocument = ChangeStreamFullDocumentOption.UpdateLookup,
-                ResumeAfter = lease.token, // Provide the resume tokens to watcher
                 BatchSize = _builder.processorOptions.BatchSize, //Define the batch size
             };
+
+            if(lease.token != null)
+                options.ResumeAfter = lease.token; // Provide the resume tokens to watcher
+
+            if (!_builder.processorOptions.IsCosmosRU && lease.token == null)
+            {
+                var startDate = (DateTimeOffset)(_builder.processorOptions.StartFromBeginning ? DateTime.MinValue : _builder.processorOptions.StartTime);
+                //Not Yet Supported on vCore: options.StartAtOperationTime = BsonTimestamp.Create(startDate.ToUnixTimeSeconds());
+            }
 
             try
             {
@@ -318,7 +341,7 @@ namespace Mongo.ChangeStreams.Processor
                 {
                     foreach (var key in _collectionPartitions.Keys.Except(_acquiredPartitions.Keys))
                     {
-                        var leasedPartition = await _leaseStore.AcquireLeaseAsync(_collectionPartitions[key]);
+                        var leasedPartition = await _leaseStore.AcquireLeaseAsync(_collectionPartitions[key], _builder.leaseOptions.LeaseExpirationInterval);
                         if (leasedPartition != null)
                         {
                             var t = ProcessPartitionAsync(leasedPartition, _cancellation.Token);

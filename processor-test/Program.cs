@@ -32,8 +32,9 @@ public partial class Program
             .WithCollection(collectionName)
             .WithProcessorName("consumer2", ProcessAsync)
             //.WithDisableBalance()
-            .WithLeaseExpirationInterval(60000)
-            .WithLeaseRenewalInterval(30000)
+            //.WithLeaseExpirationInterval(60000)
+            //.WithLeaseRenewalInterval(30000)
+            .WithStartFromBeginning()
             .WithDebugLogs()
             .Build();
 
